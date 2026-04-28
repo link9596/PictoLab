@@ -1,0 +1,35 @@
+name: PictoLab
+description: "Manage your picture and video in gitlab."
+publish_to: 'none'
+version: 1.0.1
+
+environment:
+  sdk: ^3.11.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  image_picker: ^1.1.2
+  dio: ^5.5.0+1
+  flutter_secure_storage: ^9.2.2
+  provider: ^6.1.2
+  path_provider: ^2.1.3
+  clipboard: ^0.1.3
+  uuid: ^4.4.0
+  flutter_local_notifications: ^17.2.0
+  video_thumbnail: ^0.5.3
+  file_picker: ^8.0.0+1
+  cached_network_image: ^3.3.1
+  package_info_plus: ^8.1.0
+  flutter_bicubic_resize: ^1.2.3
+  photo_view: ^0.15.0
+  flutter_cache_manager: ^3.3.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
