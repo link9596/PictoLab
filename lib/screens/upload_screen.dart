@@ -37,7 +37,7 @@ class _UploadScreenState extends State<UploadScreen> with SingleTickerProviderSt
   late AnimationController _batchAnimationController;
   double _animatedBatchProgress = 0.0;
 
-  // 单张图片视频上传共用实时进度
+  // 单张图片视频上传实时进度
   bool _isSingleUploading = false;
   double _singleProgress = 0.0;
 
@@ -149,6 +149,7 @@ class _UploadScreenState extends State<UploadScreen> with SingleTickerProviderSt
     return file;
   }
 
+  // 原始压缩方法
   Future<XFile> _compressImage(XFile original) async {
     if (!_enableCompression) return original;
     try {
@@ -181,6 +182,44 @@ class _UploadScreenState extends State<UploadScreen> with SingleTickerProviderSt
     } catch (e) {
       print('压缩失败: $e，使用原图');
       return original;
+    }
+  }
+
+  // 获取压缩前后文件大小 仅单张
+  Future<(XFile, int, int)> _compressImageWithSize(XFile original) async {
+    final originalSize = await original.length();
+    if (!_enableCompression) return (original, originalSize, originalSize);
+    try {
+      final bytes = await original.readAsBytes();
+      final info = await BicubicResizer.getImageInfoAsync(bytes);
+      final int originalWidth = info.width;
+      final int originalHeight = info.height;
+      final double aspectRatio = originalWidth / originalHeight;
+      const int maxDimension = 2560;
+      int targetWidth = originalWidth;
+      int targetHeight = originalHeight;
+      if (originalWidth > maxDimension || originalHeight > maxDimension) {
+        if (originalWidth >= originalHeight) {
+          targetWidth = maxDimension;
+          targetHeight = (maxDimension / aspectRatio).round();
+        } else {
+          targetHeight = maxDimension;
+          targetWidth = (maxDimension * aspectRatio).round();
+        }
+      }
+      final compressedBytes = await BicubicResizer.resizeJpegAsync(
+        jpegBytes: bytes,
+        outputWidth: targetWidth,
+        outputHeight: targetHeight,
+        quality: _compressionQuality,
+        cropAspectRatio: CropAspectRatio.original,
+      );
+      final tempFile = await _saveTempFile(compressedBytes);
+      final compressedSize = await tempFile.length();
+      return (XFile(tempFile.path), originalSize, compressedSize);
+    } catch (e) {
+      print('压缩失败: $e，使用原图');
+      return (original, originalSize, originalSize);
     }
   }
 
@@ -232,7 +271,7 @@ class _UploadScreenState extends State<UploadScreen> with SingleTickerProviderSt
     final List<XFile>? picked = await _picker.pickMultiImage();
     if (picked == null || picked.isEmpty) return;
 
-    // 单张图片走百分比进度
+    // 单张图片百分比进度
     if (picked.length == 1) {
       final XFile img = picked[0];
       String? customName;
@@ -251,16 +290,8 @@ class _UploadScreenState extends State<UploadScreen> with SingleTickerProviderSt
         _singleProgress = 0.0;
       });
 
-      // 图片压缩
-      XFile toUpload = img;
-      if (_enableCompression) {
-        try {
-          toUpload = await _compressImage(img);
-        } catch (e) {
-          print('压缩失败: $e');
-          toUpload = img;
-        }
-      }
+      // 压缩并获取大小
+      final (toUpload, originalSize, compressedSize) = await _compressImageWithSize(img);
 
       // 上传进度回调
       try {
@@ -276,7 +307,14 @@ class _UploadScreenState extends State<UploadScreen> with SingleTickerProviderSt
           },
         );
         setState(() => _isSingleUploading = false);
-        _showSuccessDialog(result['markdown'], result['url'], result['name']);
+        // 传入压缩前后大小
+        _showSuccessDialog(
+          result['markdown'],
+          result['url'],
+          result['name'],
+          originalSize: originalSize,
+          compressedSize: compressedSize,
+        );
       } catch (e) {
         setState(() => _isSingleUploading = false);
         _showErrorDialog('上传失败: $e');
@@ -338,8 +376,8 @@ class _UploadScreenState extends State<UploadScreen> with SingleTickerProviderSt
     });
 
     String msg = _batchFail == 0
-        ? '批量上传成功 $_batchSuccess 张'
-        : '批量上传完成：成功 $_batchSuccess 张，失败 $_batchFail 张';
+        ? '成功上传 $_batchSuccess 张'
+        : '上传完成：成功 $_batchSuccess 张，失败 $_batchFail 张';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(msg),
@@ -354,8 +392,21 @@ class _UploadScreenState extends State<UploadScreen> with SingleTickerProviderSt
     });
   }
 
-  void _showSuccessDialog(String markdownLink, String rawUrl, String fileName) {
+  // 成功弹窗显示压缩大小
+  void _showSuccessDialog(String markdownLink, String rawUrl, String fileName,
+      {int? originalSize, int? compressedSize}) {
     final htmlLink = '<img src="$rawUrl" alt="$fileName">';
+
+    // 构建额外的大小信息
+    List<Widget> extraInfo = [];
+    if (originalSize != null && compressedSize != null && originalSize != compressedSize) {
+      extraInfo.add(Text(
+        '已启用图片压缩: ${_formatSize(originalSize)} → ${_formatSize(compressedSize)}',
+        style: const TextStyle(fontSize: 12, color: Colors.grey),
+      ));
+      extraInfo.add(const SizedBox(height: 8));
+    }
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -368,6 +419,7 @@ class _UploadScreenState extends State<UploadScreen> with SingleTickerProviderSt
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            ...extraInfo,
             Text('文件名: $fileName'),
             const SizedBox(height: 8),
             const Text('Markdown 链接:', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -397,6 +449,13 @@ class _UploadScreenState extends State<UploadScreen> with SingleTickerProviderSt
         ],
       ),
     );
+  }
+
+  // 格式化文件大小
+  String _formatSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 
   void _copyAndSnack(String text, String msg) {
