@@ -1,3 +1,3 @@
 # PictoLab
 
-A new Flutter project.
+> Gitlab/JihuLab图床管理器，支持图片视频上传与删除、图片压缩后上传、相册管理、一键导出链接、多配置一键切换等功能
