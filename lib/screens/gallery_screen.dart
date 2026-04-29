@@ -7,7 +7,6 @@ import 'package:photo_view/photo_view.dart';
 
 class GalleryScreen extends StatefulWidget {
   final GitLabService gitLabService;
-
   const GalleryScreen({Key? key, required this.gitLabService}) : super(key: key);
 
   @override
@@ -15,26 +14,66 @@ class GalleryScreen extends StatefulWidget {
 }
 
 class _GalleryScreenState extends State<GalleryScreen> {
-  List<Map<String, dynamic>> _files = [];
-  bool _isLoading = true;
+  String _currentPath = '';
+  List<Map<String, dynamic>> _currentItems = [];
+  int _currentPage = 1;
+  bool _hasMore = true;
+  bool _isLoading = false;
+  bool _isLoadingMore = false;
+  bool _isRefreshing = false;
   String? _errorMessage;
+  final ScrollController _scrollController = ScrollController();
+
+  final Map<String, Future<int>> _sizeFutures = {};
 
   @override
   void initState() {
     super.initState();
-    _loadFiles();
+    _loadPage(refresh: true);
+    _scrollController.addListener(() {
+      if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 200 &&
+          !_isLoadingMore &&
+          _hasMore &&
+          !_isLoading &&
+          !_isRefreshing) {
+        _loadMore();
+      }
+    });
   }
 
-  Future<void> _loadFiles() async {
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadPage({bool refresh = true}) async {
+    if (refresh) {
+      setState(() {
+        _currentPage = 1;
+        _hasMore = true;
+        _isLoading = true;
+        _errorMessage = null;
+        _currentItems.clear();
+        _sizeFutures.clear();
+      });
+    } else {
+      setState(() => _isLoading = true);
+    }
 
     try {
-      final files = await widget.gitLabService.getUploadedFiles();
+      final result = await widget.gitLabService.getFilesPage(
+        page: _currentPage,
+        perPage: 50,
+        path: _currentPath.isEmpty ? null : _currentPath,
+      );
       setState(() {
-        _files = files;
+        if (refresh) {
+          _currentItems = result.files;
+        } else {
+          _currentItems.addAll(result.files);
+        }
+        _hasMore = result.hasNext;
         _isLoading = false;
       });
     } catch (e) {
@@ -45,21 +84,94 @@ class _GalleryScreenState extends State<GalleryScreen> {
     }
   }
 
+  Future<void> _loadMore() async {
+    if (_isLoadingMore || !_hasMore) return;
+    setState(() => _isLoadingMore = true);
+    _currentPage++;
+    try {
+      final result = await widget.gitLabService.getFilesPage(
+        page: _currentPage,
+        perPage: 50,
+        path: _currentPath.isEmpty ? null : _currentPath,
+      );
+      setState(() {
+        _currentItems.addAll(result.files);
+        _hasMore = result.hasNext;
+        _isLoadingMore = false;
+      });
+    } catch (e) {
+      setState(() {
+        _errorMessage = e.toString();
+        _isLoadingMore = false;
+      });
+    }
+  }
+
+  Future<void> _refresh() async {
+    if (_isRefreshing) return;
+    setState(() => _isRefreshing = true);
+    _sizeFutures.clear();
+    await _loadPage(refresh: true);
+    setState(() => _isRefreshing = false);
+  }
+
+  void _enterFolder(String folderPath) {
+    setState(() {
+      _currentPath = folderPath;
+      _currentPage = 1;
+      _hasMore = true;
+      _isLoading = true;
+      _errorMessage = null;
+      _currentItems.clear();
+      _sizeFutures.clear();
+    });
+    _loadPage(refresh: true);
+  }
+
+  void _goBack() {
+    if (_currentPath.isEmpty) return;
+    final lastSlash = _currentPath.lastIndexOf('/');
+    final parentPath = lastSlash == -1 ? '' : _currentPath.substring(0, lastSlash);
+    setState(() {
+      _currentPath = parentPath;
+      _currentPage = 1;
+      _hasMore = true;
+      _isLoading = true;
+      _errorMessage = null;
+      _currentItems.clear();
+      _sizeFutures.clear();
+    });
+    _loadPage(refresh: true);
+  }
+
   bool _isVideo(String fileName) {
     final ext = fileName.split('.').last.toLowerCase();
     return ['mp4', 'mov', 'avi', 'mkv', 'webm'].contains(ext);
   }
 
-  String _getRawUrl(String filePath) {
-    return widget.gitLabService.getRawUrl(filePath);
+  String _getRawUrl(String filePath) => widget.gitLabService.getRawUrl(filePath);
+
+  Future<int> _getFileSize(String filePath) {
+    if (_sizeFutures.containsKey(filePath)) {
+      return _sizeFutures[filePath]!;
+    }
+    final future = widget.gitLabService.getFileSize(filePath);
+    _sizeFutures[filePath] = future;
+    return future;
+  }
+
+  String _formatFileSize(int bytes) {
+    if (bytes <= 0) return '';
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 
   void _showExportDialog(Map<String, dynamic> file) {
     final fileName = file['name'];
     final filePath = file['path'];
     final rawUrl = _getRawUrl(filePath);
-    final markdownLink = '![$fileName]($rawUrl)';
-    final htmlLink = '<img src="$rawUrl" alt="$fileName">';
+    final isVideo = _isVideo(fileName);
 
     showDialog(
       context: context,
@@ -69,61 +181,70 @@ class _GalleryScreenState extends State<GalleryScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('原始链接：', style: TextStyle(fontWeight: FontWeight.bold)),
-              SelectableText(rawUrl),
-              SizedBox(height: 8),
-              Text('Markdown：', style: TextStyle(fontWeight: FontWeight.bold)),
-              SelectableText(markdownLink),
-              SizedBox(height: 8),
-              Text('HTML：', style: TextStyle(fontWeight: FontWeight.bold)),
-              SelectableText(htmlLink),
-            ],
+            children: isVideo
+                ? [
+                    // 视频：只显示原始链接和 HTML 链接（video 标签）
+                    Text('HTML 链接：', style: TextStyle(fontWeight: FontWeight.bold)),
+                    SelectableText('<video src="$rawUrl" controls></video>'),
+                    SizedBox(height: 12),
+                    Text('原始链接：', style: TextStyle(fontWeight: FontWeight.bold)),
+                    SelectableText(rawUrl),
+                  ]
+                : [
+                    // 图片：显示 Markdown、HTML、原始链接
+                    Text('Markdown：', style: TextStyle(fontWeight: FontWeight.bold)),
+                    SelectableText('![$fileName]($rawUrl)'),
+                    SizedBox(height: 8),
+                    Text('HTML：', style: TextStyle(fontWeight: FontWeight.bold)),
+                    SelectableText('<img src="$rawUrl" alt="$fileName">'),
+                    SizedBox(height: 8),
+                    Text('原始链接：', style: TextStyle(fontWeight: FontWeight.bold)),
+                    SelectableText(rawUrl),
+                  ],
           ),
         ),
         actions: [
+          if (!isVideo)
+            TextButton.icon(
+              onPressed: () {
+                FlutterClipboard.copy('![$fileName]($rawUrl)');
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Markdown已复制')));
+              },
+              icon: const Icon(Icons.code),
+              label: const Text('复制Markdown'),
+            ),
+          TextButton.icon(
+            onPressed: () {
+              FlutterClipboard.copy(isVideo ? '<video src="$rawUrl" controls></video>' : '<img src="$rawUrl" alt="$fileName">');
+              Navigator.pop(context);
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('HTML已复制')));
+            },
+            icon: const Icon(Icons.html),
+            label: const Text('复制HTML'),
+          ),
           TextButton.icon(
             onPressed: () {
               FlutterClipboard.copy(rawUrl);
               Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('原始链接已复制')));
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('原始链接已复制')));
             },
-            icon: Icon(Icons.link),
-            label: Text('复制链接'),
+            icon: const Icon(Icons.link),
+            label: const Text('复制链接'),
           ),
-          TextButton.icon(
-            onPressed: () {
-              FlutterClipboard.copy(markdownLink);
-              Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Markdown已复制')));
-            },
-            icon: Icon(Icons.code),
-            label: Text('复制Markdown'),
-          ),
-          TextButton.icon(
-            onPressed: () {
-              FlutterClipboard.copy(htmlLink);
-              Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('HTML已复制')));
-            },
-            icon: Icon(Icons.html),
-            label: Text('复制HTML'),
-          ),
-          TextButton(onPressed: () => Navigator.pop(context), child: Text('关闭')),
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('关闭')),
         ],
       ),
     );
   }
 
-  // 图片预览
   void _previewImage(String imageUrl) {
     Navigator.of(context).push(
       PageRouteBuilder(
         opaque: false,
         barrierDismissible: false,
         barrierColor: Colors.black87,
-        pageBuilder: (context, animation, secondaryAnimation) =>
-            _ImagePreviewPage(imageUrl: imageUrl),
+        pageBuilder: (context, animation, secondaryAnimation) => _ImagePreviewPage(imageUrl: imageUrl),
       ),
     );
   }
@@ -132,152 +253,216 @@ class _GalleryScreenState extends State<GalleryScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('确认删除'),
-        content: Text('确定要永久删除 "${file['name']}" 吗？'),
+        title: const Text('确认删除'),
+        content: Text('确定要删除 "${file['name']}" 吗？\n云端也将同步删除'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: Text('取消')),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: Text('删除', style: TextStyle(color: Colors.red))),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('删除', style: TextStyle(color: Colors.red))),
         ],
       ),
     );
     if (confirmed != true) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('正在删除...')));
-
     try {
       final filePath = file['path'];
       await widget.gitLabService.deleteImage(filePath);
-      await _loadFiles();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('删除成功'), backgroundColor: Colors.green));
+      await _refresh();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('删除成功', style: TextStyle(color: Colors.white)),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 1),
+        ),
+      );
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('删除失败: $e'), backgroundColor: Colors.red));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('删除失败: $e', style: const TextStyle(color: Colors.white)),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 1),
+        ),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return Center(child: CircularProgressIndicator());
-    }
-    if (_errorMessage != null) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.error, size: 64, color: Colors.red),
-            SizedBox(height: 16),
-            Text('加载失败: $_errorMessage'),
-            SizedBox(height: 16),
-            ElevatedButton(onPressed: _loadFiles, child: Text('重试')),
-          ],
-        ),
-      );
-    }
-    if (_files.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.photo_library, size: 64, color: Colors.grey),
-            SizedBox(height: 16),
-            Text('暂无文件，请先上传'),
-          ],
-        ),
-      );
-    }
+    final String title = _currentPath.isEmpty ? '根目录' : _currentPath;
+    final bool showBackButton = _currentPath.isNotEmpty;
+    final bool showLoadingIndicator = _isLoading && _currentItems.isEmpty;
+    final bool showEmpty = !_isLoading && _currentItems.isEmpty && _errorMessage == null;
 
-    return RefreshIndicator(
-      onRefresh: _loadFiles,
-      child: GridView.builder(
-        padding: EdgeInsets.all(8),
-        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 2,
-          crossAxisSpacing: 8,
-          mainAxisSpacing: 8,
-          childAspectRatio: 0.7,
-        ),
-        itemCount: _files.length,
-        itemBuilder: (context, index) {
-          final file = _files[index];
-          final fileName = file['name'];
-          final filePath = file['path'];
-          final isVideoFile = _isVideo(fileName);
-          final rawUrl = _getRawUrl(filePath);
-
-          return Card(
-            elevation: 2,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(
-                  child: GestureDetector(
-                    onTap: isVideoFile ? null : () => _previewImage(rawUrl),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.vertical(top: Radius.circular(8)),
-                      child: isVideoFile
-                          ? Container(
-                              color: Colors.grey[300],
-                              child: Icon(Icons.video_library, size: 60, color: Colors.blue),
-                            )
-                          : CachedNetworkImage(
-                              imageUrl: rawUrl,
-                              fit: BoxFit.cover,
-                              width: double.infinity,
-                              placeholder: (context, url) => Container(color: Colors.grey[200], child: Center(child: CircularProgressIndicator())),
-                              errorWidget: (context, url, error) => Container(color: Colors.grey[300], child: Icon(Icons.broken_image, size: 40)),
-                            ),
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(title),
+        leading: showBackButton
+            ? IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: _goBack,
+              )
+            : null,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _isRefreshing ? null : _refresh,
+            tooltip: '刷新',
+          ),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: _refresh,
+        child: showLoadingIndicator
+            ? const Center(child: CircularProgressIndicator())
+            : showEmpty
+                ? const Center(child: Text('此目录为空'))
+                : GridView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.all(8),
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 2,
+                      crossAxisSpacing: 8,
+                      mainAxisSpacing: 8,
+                      childAspectRatio: 0.7,
                     ),
+                    itemCount: _currentItems.length + (_isLoadingMore ? 1 : 0),
+                    itemBuilder: (context, index) {
+                      if (index == _currentItems.length && _isLoadingMore) {
+                        return const Center(child: Padding(padding: EdgeInsets.all(16), child: CircularProgressIndicator()));
+                      }
+                      final item = _currentItems[index];
+                      final isFolder = item['type'] == 'tree';
+                      final name = item['name'];
+                      final path = item['path'];
+
+                      return _FadeInCard(
+                        child: isFolder
+                            ? Card(
+                                elevation: 2,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                child: InkWell(
+                                  onTap: () => _enterFolder(path),
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      const Icon(Icons.folder, size: 60, color: Colors.amber),
+                                      const SizedBox(height: 8),
+                                      Text(name, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis),
+                                    ],
+                                  ),
+                                ),
+                              )
+                            : Card(
+                                elevation: 2,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                                  children: [
+                                    Expanded(
+                                      child: GestureDetector(
+                                        onTap: _isVideo(name) ? null : () => _previewImage(_getRawUrl(path)),
+                                        child: ClipRRect(
+                                          borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+                                          child: _isVideo(name)
+                                              ? Container(color: Colors.grey[300], child: const Icon(Icons.video_library, size: 60, color: Colors.blue))
+                                              : CachedNetworkImage(
+                                                  imageUrl: _getRawUrl(path),
+                                                  fit: BoxFit.cover,
+                                                  width: double.infinity,
+                                                  placeholder: (context, url) => Container(color: Colors.grey[200], child: const Center(child: CircularProgressIndicator())),
+                                                  errorWidget: (context, url, error) => Container(color: Colors.grey[300], child: const Icon(Icons.broken_image, size: 40)),
+                                                ),
+                                        ),
+                                      ),
+                                    ),
+                                    Padding(
+                                      padding: const EdgeInsets.all(8),
+                                      child: Column(
+                                        children: [
+                                          Text(name, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
+                                          const SizedBox(height: 2),
+                                          FutureBuilder<int>(
+                                            future: _getFileSize(path),
+                                            builder: (context, snapshot) {
+                                              if (snapshot.hasData && snapshot.data! > 0) {
+                                                return Text(_formatFileSize(snapshot.data!), style: const TextStyle(fontSize: 10, color: Colors.grey));
+                                              } else if (snapshot.hasError) {
+                                                return const SizedBox.shrink();
+                                              } else {
+                                                return const SizedBox(
+                                                  height: 14,
+                                                  child: Center(child: SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1))),
+                                                );
+                                              }
+                                            },
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Row(
+                                            mainAxisAlignment: MainAxisAlignment.center,
+                                            children: [
+                                              IconButton(
+                                                icon: const Icon(Icons.copy, size: 18),
+                                                onPressed: () {
+                                                  FlutterClipboard.copy(_getRawUrl(path));
+                                                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('链接已复制')));
+                                                },
+                                                tooltip: '复制链接',
+                                              ),
+                                              IconButton(
+                                                icon: const Icon(Icons.share, size: 18),
+                                                onPressed: () => _showExportDialog(item),
+                                                tooltip: '导出链接',
+                                              ),
+                                              IconButton(
+                                                icon: const Icon(Icons.delete, size: 18, color: Colors.red),
+                                                onPressed: () => _deleteFile(item),
+                                                tooltip: '删除',
+                                              ),
+                                            ],
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                      );
+                    },
                   ),
-                ),
-                Padding(
-                  padding: EdgeInsets.all(8),
-                  child: Column(
-                    children: [
-                      Text(
-                        fileName,
-                        textAlign: TextAlign.center,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 12),
-                      ),
-                      SizedBox(height: 4),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          IconButton(
-                            icon: Icon(Icons.copy, size: 18),
-                            onPressed: () {
-                              FlutterClipboard.copy(rawUrl);
-                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('链接已复制')));
-                            },
-                            tooltip: '复制链接',
-                          ),
-                          IconButton(
-                            icon: Icon(Icons.share, size: 18),
-                            onPressed: () => _showExportDialog(file),
-                            tooltip: '导出链接',
-                          ),
-                          IconButton(
-                            icon: Icon(Icons.delete, size: 18, color: Colors.red),
-                            onPressed: () => _deleteFile(file),
-                            tooltip: '删除',
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
       ),
     );
   }
 }
 
-// 预览页面
+class _FadeInCard extends StatefulWidget {
+  final Widget child;
+  const _FadeInCard({required this.child});
+
+  @override
+  State<_FadeInCard> createState() => _FadeInCardState();
+}
+
+class _FadeInCardState extends State<_FadeInCard> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 400));
+    _animation = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
+    _controller.forward();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FadeTransition(opacity: _animation, child: widget.child);
+}
+
 class _ImagePreviewPage extends StatelessWidget {
   final String imageUrl;
   const _ImagePreviewPage({required this.imageUrl});
@@ -291,16 +476,11 @@ class _ImagePreviewPage extends StatelessWidget {
           PhotoView(
             imageProvider: NetworkImage(imageUrl),
             backgroundDecoration: const BoxDecoration(color: Colors.black),
-            // 初始缩放为适应屏幕（contain）
             initialScale: PhotoViewComputedScale.contained,
-            // 最小缩放为适应屏幕，防止缩小到比屏幕还小
             minScale: PhotoViewComputedScale.contained,
-            // 最大缩放：屏幕的 3 倍，足够铺满全屏并放大局部细节
             maxScale: PhotoViewComputedScale.covered * 2,
-            // 启用双击缩放
             enableRotation: false,
           ),
-          // 右上角关闭按钮
           Positioned(
             top: 40,
             right: 16,

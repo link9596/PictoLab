@@ -5,6 +5,13 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as path;
 import 'package:uuid/uuid.dart';
 
+// 定义分页返回结果
+class PaginatedFilesResult {
+  final List<Map<String, dynamic>> files;
+  final bool hasNext;
+  PaginatedFilesResult({required this.files, required this.hasNext});
+}
+
 class GitLabService {
   final Dio _dio = Dio();
 
@@ -44,11 +51,31 @@ class GitLabService {
     return '$_baseUrl/$_projectPath/-/raw/$_branch/$filePath';
   }
 
-  // 通用上传方法，支持自定义文件名
+  // 获取单个文件的大小
+  Future<int> getFileSize(String filePath) async {
+    final encodedPath = Uri.encodeComponent(filePath);
+    final url = '$_baseUrl/api/v4/projects/$_projectId/repository/files/$encodedPath?ref=$_branch';
+    try {
+      final Response response = await _dio.get(
+        url,
+        options: Options(headers: {'PRIVATE-TOKEN': _privateToken}),
+      );
+      if (response.statusCode == 200 && response.data['size'] != null) {
+        return response.data['size'] as int;
+      }
+      return 0;
+    } catch (e) {
+      print('Get file size error: $e');
+      return 0;
+    }
+  }
+
+  // 通用上传方法，自定义文件名
   Future<Map<String, dynamic>> uploadFile(
     XFile file, {
     void Function(int sent, int total)? onProgress,
     String? customFileName,
+    String? folderType,                     // 'img' 或 'video'
   }) async {
     File localFile = File(file.path);
     List<int> fileBytes = await localFile.readAsBytes();
@@ -57,7 +84,6 @@ class GitLabService {
     String extension = path.extension(file.name);
     String fileName;
     if (customFileName != null && customFileName.isNotEmpty) {
-      // 如果没有扩展名自动加上
       if (!customFileName.contains('.')) {
         fileName = '$customFileName$extension';
       } else {
@@ -70,7 +96,8 @@ class GitLabService {
 
     final now = DateTime.now();
     final yearMonthDir = '${now.year}/${now.month.toString().padLeft(2, '0')}';
-    final filePath = "$yearMonthDir/$fileName";
+    final subDir = (folderType != null && folderType.isNotEmpty) ? '/$folderType' : '';
+    final filePath = "$yearMonthDir$subDir/$fileName";
 
     String encodedFilePath = Uri.encodeComponent(filePath);
     String url = '$_baseUrl/api/v4/projects/$_projectId/repository/files/$encodedFilePath';
@@ -78,7 +105,7 @@ class GitLabService {
     Map<String, dynamic> data = {
       "branch": _branch,
       "content": base64Content,
-      "commit_message": "Upload file $fileName to $yearMonthDir via App",
+      "commit_message": "Upload file $fileName to $yearMonthDir$subDir via App",
       "encoding": "base64",
     };
 
@@ -131,37 +158,93 @@ class GitLabService {
     }
   }
 
+  // ========== 分页获取文件 ==========
+  Future<PaginatedFilesResult> getFilesPage({
+    required int page,
+    int perPage = 50,
+    String? path,
+  }) async {
+    String url = '$_baseUrl/api/v4/projects/$_projectId/repository/tree'
+        '?ref=$_branch'
+        '&per_page=$perPage'
+        '&page=$page'
+        '&order_by=name'
+        '&sort=desc';
+    if (path != null && path.isNotEmpty) {
+      url += '&path=${Uri.encodeComponent(path)}';
+    }
+    final Response response = await _dio.get(
+      url,
+      options: Options(headers: {'PRIVATE-TOKEN': _privateToken}),
+    );
+    if (response.statusCode != 200) {
+      throw Exception('获取列表失败，状态码：${response.statusCode}');
+    }
+
+    List<dynamic> items = response.data;
+    List<Map<String, dynamic>> result = [];
+    for (var item in items) {
+      result.add(item as Map<String, dynamic>);
+    }
+
+    bool hasNext = false;
+    final nextPageHeader = response.headers['X-Next-Page']?.first;
+    if (nextPageHeader != null && nextPageHeader.isNotEmpty) {
+      hasNext = true;
+    } else if (items.length == perPage) {
+      hasNext = true;
+    }
+    return PaginatedFilesResult(files: result, hasNext: hasNext);
+  }
+
+  // ========== 递归获取所有文件 ==========
   Future<List<Map<String, dynamic>>> getUploadedFiles() async {
     return await _getAllFiles('');
   }
 
+  // 内部递归方法，分页（获取当前目录的全部文件）
   Future<List<Map<String, dynamic>>> _getAllFiles(String currentPath) async {
-    String url = '$_baseUrl/api/v4/projects/$_projectId/repository/tree?ref=$_branch';
-    if (currentPath.isNotEmpty) {
-      url += '&path=${Uri.encodeComponent(currentPath)}';
-    }
-    try {
-      final Response response = await _dio.get(
-        url,
-        options: Options(headers: {'PRIVATE-TOKEN': _privateToken}),
-      );
-      if (response.statusCode != 200) {
-        throw Exception('获取列表失败，状态码：${response.statusCode}');
+    const int perPage = 100;
+    int page = 1;
+    List<Map<String, dynamic>> allFiles = [];
+
+    while (true) {
+      String url = '$_baseUrl/api/v4/projects/$_projectId/repository/tree'
+          '?ref=$_branch'
+          '&per_page=$perPage'
+          '&page=$page';
+      if (currentPath.isNotEmpty) {
+        url += '&path=${Uri.encodeComponent(currentPath)}';
       }
-      List<dynamic> items = response.data;
-      List<Map<String, dynamic>> files = [];
-      for (var item in items) {
-        if (item['type'] == 'blob') {
-          files.add(item as Map<String, dynamic>);
-        } else if (item['type'] == 'tree') {
-          final subFiles = await _getAllFiles(item['path']);
-          files.addAll(subFiles);
+      try {
+        final Response response = await _dio.get(
+          url,
+          options: Options(headers: {'PRIVATE-TOKEN': _privateToken}),
+        );
+        if (response.statusCode != 200) {
+          throw Exception('获取列表失败，状态码：${response.statusCode}');
         }
+        List<dynamic> items = response.data;
+        if (items.isEmpty) break;
+
+        for (var item in items) {
+          if (item['type'] == 'blob') {
+            allFiles.add(item as Map<String, dynamic>);
+          } else if (item['type'] == 'tree') {
+            final subFiles = await _getAllFiles(item['path']);
+            allFiles.addAll(subFiles);
+          }
+        }
+        final nextPage = response.headers['X-Next-Page']?.first;
+        if (nextPage == null || nextPage.isEmpty) {
+          if (items.length < perPage) break;
+        }
+        page++;
+      } catch (e) {
+        print('Get files error at path "$currentPath": $e');
+        throw Exception('获取文件列表错误: $e');
       }
-      return files;
-    } catch (e) {
-      print('Get files error: $e');
-      throw Exception('获取文件列表错误: $e');
     }
+    return allFiles;
   }
 }

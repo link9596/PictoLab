@@ -262,7 +262,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
       ScaffoldMessenger.of(context).clearSnackBars();
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('所有缓存已清理'), backgroundColor: Colors.green),
+        const SnackBar(content: Text('缓存已清理'), backgroundColor: Colors.green),
       );
     } catch (e) {
       ScaffoldMessenger.of(context).clearSnackBars();
@@ -323,7 +323,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('配置方案列表', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const Text('配置方案', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               IconButton(
                 icon: const Icon(Icons.add),
                 onPressed: () => _editConfig(null),
@@ -373,8 +373,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 children: const [
                   Text('说明', style: TextStyle(fontWeight: FontWeight.bold)),
                   SizedBox(height: 8),
-                  Text('• 可以保存多套 GitLab 配置并切换。'),
-                  Text('• 开启“上传前重命名”后，每次上传前会弹出对话框来自定义文件名。'),
+                  Text('• 可以保存多套 GitLab 配置并切换'),
+                  Text('• GitLab生成的Token最长拥有365天有效期哦，如果连接出错请检查Token是否过期'),
+                  Text('• 开启“上传前重命名”后，每次上传前都会弹出对话框来自定义文件名（仅限单文件上传）'),
                 ],
               ),
             ),
